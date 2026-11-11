@@ -1,0 +1,162 @@
+INÍCIO
+
+Receber parâmetros do Zabbix
+
+Validar:
+    rt_url
+    rt_token
+    subject
+    message
+
+Configurar headers HTTP
+    Authorization
+    Content-Type
+    Accept
+
+Ler EVENT_TAGS
+
+Extrair:
+    rt_queue
+    geo
+    pop
+
+SE rt_queue não existir
+    ERRO "Fila não definida"
+FIM
+
+Normalizar URL do RT
+
+--------------------------------------------------
+TRATAMENTO DE LOCALIZAÇÃO
+--------------------------------------------------
+
+SE geo existir
+
+    latitude = valor antes da vírgula
+    longitude = valor depois da vírgula
+
+    converter para DMS
+
+    gerar link:
+        https://www.google.com/maps?q=lat,long
+
+SENÃO
+
+    localização = "Não informada"
+    link_maps = ""
+
+FIM
+
+--------------------------------------------------
+MONTAR DISPATCH TÉCNICO
+--------------------------------------------------
+
+dispatch =
+
+    DATA/HORA
+    HOST
+    EVENTO
+    RT_QUEUE
+    POP
+    LOCALIZAÇÃO
+    LINK_MAPS
+
+--------------------------------------------------
+EVENTO ABERTO
+--------------------------------------------------
+
+SE event_value == 1
+
+    montar consulta SQL RT
+
+    procurar ticket aberto
+
+    SE ticket existir
+
+        adicionar correspondência
+
+        responder:
+
+            rt_ticket_id
+            rt_queue
+
+    SENÃO
+
+        criar payload
+
+            Queue
+            Subject
+            Content
+
+            anexar:
+                dispatch
+
+            anexar:
+                localização
+
+            anexar:
+                link_maps
+
+            SE queue == PROTOCOLO
+
+                adicionar campo POP
+
+            FIM
+
+        criar ticket no RT
+
+        salvar rt_ticket_id
+
+        retornar tags
+
+    FIM
+
+FIM
+
+--------------------------------------------------
+EVENTO FECHADO
+--------------------------------------------------
+
+SE event_value == 0
+
+    procurar ticket aberto
+
+    SE ticket encontrado
+
+        adicionar correspondência
+
+            "Evento normalizado"
+
+        alterar status
+
+            resolved
+
+    FIM
+
+RETORNAR OK
+
+--------------------------------------------------
+FUNÇÕES AUXILIARES
+--------------------------------------------------
+
+parseEventTags()
+
+chooseQueue()
+
+extractPopFromHostGroups()
+
+extractGeo()
+
+decimalParaDMS()
+
+buildMapsLink()
+
+findOpenTicketId()
+
+replyToTicket()
+
+createTicket()
+
+resolveTicket()
+
+FIM

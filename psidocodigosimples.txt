@@ -1,0 +1,36 @@
+Zabbix
+   │
+   ▼
+Webhook JS
+   │
+   ├── Ler rt_queue
+   ├── Ler POP
+   ├── Ler GEO
+   │
+   ▼
+Evento abriu?
+   │
+   ├── SIM
+   │      │
+   │      ▼
+   │  Ticket existe?
+   │      │
+   │      ├── SIM → Atualiza Ticket
+   │      │
+   │      └── NÃO
+   │             │
+   │             ├── Converte coordenadas
+   │             ├── Gera Link Maps
+   │             ├── Monta Dispatch
+   │             └── Cria Ticket
+   │
+   ▼
+Evento fechou?
+   │
+   ├── SIM
+   │      │
+   │      ├── Adiciona comentário
+   │      └── Resolve Ticket
+   │
+   ▼
+FIM

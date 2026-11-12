@@ -8,7 +8,9 @@
  * Requisitos:
  * - API REST 2.0 do RT habilitada.
  * - Token com permissao para pesquisar, criar, comentar e alterar tickets.
- * - Campo personalizado ZabbixEventID aplicado a fila do RT.
+ * - Campo personalizado ZabbixEventID aplicado a fila PROTOCOLO do RT.
+ * - Parametros latitude e longitude vindos do inventario do host.
+ * - Parametro host_groups configurado no Media Type com {TRIGGER.HOSTGROUP.NAME}.
  *
  * Observacao:
  * - O filtro para enviar somente eventos Disaster deve ser configurado
@@ -245,23 +247,73 @@ var RTWebhook = {
         return null;
     },
 
+    /* Extrai POP01..POP08 a partir dos grupos do host no formato ONU_POP0x. */
+    extractPopFromHostGroups: function (groupsRaw) {
+        if (!groupsRaw) {
+            return '';
+        }
+
+        groupsRaw = String(groupsRaw).replace(/^\s+|\s+$/g, '');
+        if (!groupsRaw) {
+            return '';
+        }
+
+        var groups = groupsRaw.split(/\s*,\s*|\s*\n\s*/);
+
+        for (var i = 0; i < groups.length; i++) {
+            var g = groups[i].replace(/^\s+|\s+$/g, '');
+            var m = g.match(/^ONU_(POP0[1-8])$/i);
+            if (m && m[1]) {
+                return m[1].toUpperCase();
+            }
+        }
+
+        return '';
+    },
+
+    /* Extrai o POP de params.pop (ignorando *UNKNOWN*) ou via extractPopFromHostGroups. */
+    getPop: function () {
+        var popParam;
+
+        if (RTWebhook.params.pop) {
+            popParam = String(RTWebhook.params.pop)
+                .replace(/^\s+|\s+$/g, '')
+                .toUpperCase();
+
+            if (popParam && popParam !== '*UNKNOWN*' && popParam.indexOf('{') !== 0) {
+                return popParam;
+            }
+        }
+
+        return RTWebhook.extractPopFromHostGroups(RTWebhook.params.host_groups);
+    },
+
     /* Monta o texto inicial do ticket para o tecnico. */
     buildDispatch: function (mapsLink, coordinates) {
-        var lines = [];
+        var lines = [],
+            pop = RTWebhook.getPop(),
+            eventDateTime = (
+                (RTWebhook.params.event_date || '') +
+                ' ' +
+                (RTWebhook.params.event_time || '')
+            ).replace(/^\s+|\s+$/g, ''),
+            displayDateTime = eventDateTime.replace(
+                /^(\d{4})\.(\d{2})\.(\d{2})/,
+                '$3/$2/$1'
+            ),
+            hostName = RTWebhook.params.host_name || 'Nao informado',
+            eventName = RTWebhook.params.event_name || 'Nao informado',
+            severity = RTWebhook.params.severity || 'Nao informada';
 
         lines.push('ACIONAMENTO TECNICO');
         lines.push('========================================');
         lines.push('');
-        lines.push('Unidade/Host: ' +
-            (RTWebhook.params.host_name || 'Nao informado'));
-        lines.push('IP monitorado: ' +
-            (RTWebhook.params.host_ip || 'Nao informado'));
-        lines.push('Problema: ' +
-            (RTWebhook.params.event_name || 'Nao informado'));
-        lines.push('Severidade: ' +
-            (RTWebhook.params.severity || 'Nao informada'));
-        lines.push('POP: ' +
-            (RTWebhook.params.pop || 'Nao informado'));
+        lines.push('Data/hora: ' + (displayDateTime || 'Nao informada'));
+        lines.push('');
+        lines.push('Unidade/Host: ' + hostName);
+        lines.push('POP: ' + (pop || 'Nao informado'));
+        lines.push('Problema: ' + eventName);
+        lines.push('Severidade: ' + severity);
         lines.push('');
 
         lines.push('LOCALIZACAO');
@@ -280,46 +332,27 @@ var RTWebhook = {
         else {
             lines.push('Google Maps: link nao disponivel');
         }
+        lines.push('POP: ' + (pop || 'Nao informado'));
 
         lines.push('');
         lines.push('INFORMACOES DO EVENTO');
         lines.push('----------------------------------------');
-        lines.push('Event ID: ' +
-            (RTWebhook.params.event_id || 'Nao informado'));
-        lines.push('Trigger ID: ' +
-            (RTWebhook.params.trigger_id || 'Nao informado'));
-        lines.push(
-            'Data/hora: ' +
-            (RTWebhook.params.event_date || 'Data nao informada') +
-            ' ' +
-            (RTWebhook.params.event_time || '')
-        );
-
-        if (RTWebhook.params.event_url) {
-            lines.push('Evento no Zabbix: ' + RTWebhook.params.event_url);
-        }
-
-        if (RTWebhook.params.message) {
-            lines.push('');
-            lines.push('ORIENTACOES PARA O TECNICO');
-            lines.push('----------------------------------------');
-            lines.push(RTWebhook.params.message);
-        }
-
-        if (RTWebhook.params.event_opdata) {
-            lines.push('');
-            lines.push('DADOS OPERACIONAIS');
-            lines.push('----------------------------------------');
-            lines.push(RTWebhook.params.event_opdata);
+        if (RTWebhook.params.event_info) {
+            lines.push(RTWebhook.params.event_info);
         }
 
         lines.push('');
-        lines.push('Apos o atendimento, informar:');
-        lines.push('- Causa do problema;');
-        lines.push('- Procedimento realizado;');
-        lines.push('- Resultado dos testes;');
-        lines.push('- Horario da normalizacao;');
-        lines.push('- Responsavel pelo atendimento.');
+        lines.push('ORIENTACOES DO TICKET');
+        lines.push('----------------------------------------');
+        lines.push('Problema iniciado em:  ' +
+            (eventDateTime || 'Nao informada'));
+        lines.push('');
+        lines.push('Problema : ' + hostName + ' - ' + eventName);
+        lines.push('');
+        lines.push('Severidade: ' + severity);
+        lines.push('');
+        lines.push('ID Evento Zabbix: ' +
+            (RTWebhook.params.event_id || 'Nao informado'));
 
         return lines.join('\n');
     },
@@ -331,11 +364,13 @@ var RTWebhook = {
             dispatch,
             subject,
             customFields = {},
-            payload,
+            createPayload,
             response,
             ticketId;
 
-        coordinates = RTWebhook.normalizeCoordinates(RTWebhook.params.geo);
+        coordinates = RTWebhook.normalizeCoordinates(
+            RTWebhook.params.latitude + ',' + RTWebhook.params.longitude
+        );
         mapsLink = RTWebhook.createMapsLink(coordinates);
         dispatch = RTWebhook.buildDispatch(mapsLink, coordinates);
 
@@ -354,17 +389,17 @@ var RTWebhook = {
         customFields[RTWebhook.getCustomFieldName()] =
             RTWebhook.params.event_id;
 
-        if (RTWebhook.params.rt_pop_cf && RTWebhook.params.pop) {
-            customFields[RTWebhook.params.rt_pop_cf] =
-                RTWebhook.params.pop;
+        if (RTWebhook.params.rt_queue === 'PROTOCOLO') {
+            var popValue = RTWebhook.extractPopFromHostGroups(
+                RTWebhook.params.host_groups
+            );
+
+            if (popValue) {
+                customFields['POP'] = popValue;
+            }
         }
 
-        if (RTWebhook.params.rt_geo_cf && RTWebhook.params.geo) {
-            customFields[RTWebhook.params.rt_geo_cf] =
-                RTWebhook.params.geo;
-        }
-
-        payload = {
+        createPayload = {
             Queue: RTWebhook.params.rt_queue,
             Subject: subject,
             Content: dispatch,
@@ -374,7 +409,7 @@ var RTWebhook = {
         };
 
         if (RTWebhook.params.rt_requestor) {
-            payload.Requestor = RTWebhook.params.rt_requestor;
+            createPayload.Requestor = RTWebhook.params.rt_requestor;
         }
 
         Zabbix.log(
@@ -386,7 +421,7 @@ var RTWebhook = {
         response = RTWebhook.requestApi(
             'POST',
             '/REST/2.0/ticket',
-            payload
+            createPayload
         );
 
         ticketId = response.id || null;
@@ -429,7 +464,9 @@ var RTWebhook = {
 
     /* Adiciona ao ticket as informacoes de uma atualizacao do evento. */
     updateTicket: function (ticketId) {
-        var coordinates = RTWebhook.normalizeCoordinates(RTWebhook.params.geo),
+        var coordinates = RTWebhook.normalizeCoordinates(
+                RTWebhook.params.latitude + ',' + RTWebhook.params.longitude
+            ),
             mapsLink = RTWebhook.createMapsLink(coordinates),
             comment = [];
 
@@ -438,7 +475,7 @@ var RTWebhook = {
         comment.push('Evento: ' + (RTWebhook.params.event_name || '-'));
         comment.push('Host: ' + (RTWebhook.params.host_name || '-'));
         comment.push('Severidade: ' + (RTWebhook.params.severity || '-'));
-        comment.push('POP: ' + (RTWebhook.params.pop || '-'));
+        comment.push('POP: ' + (RTWebhook.getPop() || '-'));
 
         if (coordinates && coordinates.dms) {
             comment.push('Coordenadas DMS: ' + coordinates.dms);
@@ -458,21 +495,10 @@ var RTWebhook = {
             comment.push(RTWebhook.params.event_update_message);
         }
 
-        if (RTWebhook.params.message) {
-            comment.push('');
-            comment.push('Mensagem automatica do Zabbix:');
-            comment.push(RTWebhook.params.message);
-        }
-
-        if (RTWebhook.params.event_opdata) {
-            comment.push('');
-            comment.push('Dados operacionais: ' + RTWebhook.params.event_opdata);
-        }
-
         return RTWebhook.addComment(ticketId, comment.join('\n'));
     },
 
-    /* Comenta a recuperacao e muda o status do ticket para resolved. */
+    /* Comenta a recuperacao e muda o status para resolvido. */
     resolveTicket: function (ticketId) {
         var comment = [],
             finalStatus = RTWebhook.params.rt_resolved_status || 'resolved';
@@ -487,16 +513,8 @@ var RTWebhook = {
             ' ' +
             (RTWebhook.params.event_recovery_time || '')
         );
-        comment.push('Event ID: ' + RTWebhook.params.event_id);
-
         if (RTWebhook.params.event_duration) {
             comment.push('Duracao: ' + RTWebhook.params.event_duration);
-        }
-
-        if (RTWebhook.params.message) {
-            comment.push('');
-            comment.push('Mensagem de recuperacao:');
-            comment.push(RTWebhook.params.message);
         }
 
         RTWebhook.addComment(ticketId, comment.join('\n'));
@@ -543,8 +561,7 @@ try {
     }
     else if (String(params.event_value) === '0') {
         if (ticket === null) {
-            throw 'Nao foi encontrado ticket para resolver. Event ID: ' +
-                params.event_id;
+            throw 'Nao foi encontrado ticket para resolver.';
         }
 
         RTWebhook.resolveTicket(ticket.id);

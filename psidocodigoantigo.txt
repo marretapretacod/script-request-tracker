@@ -1,0 +1,96 @@
+INÍCIO DO PROCESSO
+
+TENTAR:
+    1. ENTRADA E VALIDAÇÃO INICIAL
+        Converter 'value' (JSON) para objeto 'params'
+        Instanciar cliente HTTP ('req')
+
+        SE 'params.rt_url' estiver vazio ENTÃO LANÇAR ERRO "Missing rt_url"
+        SE 'params.rt_token' estiver vazio ENTÃO LANÇAR ERRO "Missing rt_token"
+
+        // Ignora eventos de resolução (OK), processando apenas problemas ativos
+        SE 'params.event_value' for diferente de 1 ENTÃO
+            RETORNAR "OK" e ENCERRAR
+        FIM SE
+
+    2. CONFIGURAÇÃO DA REQUISIÇÃO HTTP
+        Definir 'base_url' removendo barras extras ao final de 'params.rt_url'
+        Adicionar cabeçalhos HTTP:
+            - Content-Type: application/json
+            - Accept: application/json
+            - Authorization: token <params.rt_token>
+
+    3. EXTRAÇÃO DE DADOS E DEFINIÇÃO DA FILA (QUEUE)
+        Obter 'rawTags' de 'params.event_tags' (ou extrair da linha "EVENT_TAGS=" na mensagem)
+        
+        // Determinar fila (Função chooseQueue)
+        Definir 'queue' = "NÃO CLASSIFICADO"
+        SE 'rawTags' existir ENTÃO
+            Extrair lista de valores para a tag 'rt_queue'
+            SE houver mais de 1 tag 'rt_queue' ENTÃO
+                LANÇAR ERRO "Invalid event: multiple rt_queue tags found"
+            SENÃO SE houver exatamente 1 tag 'rt_queue' não vazia ENTÃO
+                Definir 'queue' = valor da tag 'rt_queue'
+            FIM SE
+        FIM SE
+
+        Extrair e limpar 'subject' e 'message' de 'params'
+        SE 'subject' estiver vazio ENTÃO LANÇAR ERRO "Missing subject"
+        SE 'message' estiver vazio ENTÃO LANÇAR ERRO "Missing message"
+
+        Extrair 'hostGroups' de 'params'
+
+    4. MONTAGEM DA CONSULTA DE TICKETS ABERTOS (DEDUPLICAÇÃO)
+        Extrair 'hostOnly' (texto antes do primeiro " - " em 'subject')
+        Definir filtro de status: "(Status = 'new' OR Status = 'open' OR Status = 'stalled')"
+
+        SE 'queue' for igual a "EVENTOS" ENTÃO
+            SE 'hostOnly' estiver vazio ENTÃO
+                LANÇAR ERRO "Cannot extract host from subject for EVENTOS"
+            FIM SE
+            // Busca qualquer ticket aberto para o mesmo host na fila EVENTOS
+            Montar 'ticketSql': Queue = 'EVENTOS' E Status ativo E Subject COMEÇA COM '<hostOnly> -%'
+        SENÃO
+            // Busca ticket aberto com o assunto exato na fila definida
+            Montar 'ticketSql': Queue = '<queue>' E Status ativo E Subject = '<subject>'
+        FIM SE
+
+    5. BUSCA E ATUALIZAÇÃO DE TICKET EXISTENTE
+        Consultar API do RT (GET /tickets?query=<ticketSql>)
+        SE resposta HTTP não for sucesso (200-299) ou JSON inválido ENTÃO LANÇAR ERRO
+
+        SE encontrar algum ticket na lista ('existingId') ENTÃO
+            Montar texto de resposta: "Novo evento detectado:\n\n" + message
+            Enviar atualização/correspondência para o ticket (POST /ticket/<existingId>/correspond)
+            SE resposta HTTP não for sucesso ENTÃO LANÇAR ERRO
+
+            RETORNAR JSON com tags: { "rt_ticket_id": existingId, "rt_queue": queue }
+            ENCERRAR
+        FIM SE
+
+    6. CRIAÇÃO DE NOVO TICKET (CASO NÃO EXISTA ABERTO)
+        Montar 'createPayload' com:
+            - Queue: queue
+            - Subject: subject
+            - Content: message
+
+        SE 'queue' for igual a "PROTOCOLO" ENTÃO
+            Procurar nos 'hostGroups' algum grupo no padrão "ONU_POP01" até "ONU_POP08"
+            SE encontrar ('popValue') ENTÃO
+                Adicionar campo customizado ao 'createPayload': CustomFields = { "POP": popValue }
+            FIM SE
+        FIM SE
+
+        Registrar logs no Zabbix
+        Enviar requisição de criação (POST /ticket com 'createPayload')
+        SE resposta HTTP não for 201 ou sucesso (200-299) ou JSON inválido ou sem ID ENTÃO
+            LANÇAR ERRO
+        FIM SE
+
+        RETORNAR JSON com tags: { "rt_ticket_id": created.id, "rt_queue": queue }
+
+CAPTURAR (erro):
+    Registrar erro no log do Zabbix (nível 3)
+    LANÇAR EXCEÇÃO "Failed with error: " + erro
+
+FIM DO PROCESSO

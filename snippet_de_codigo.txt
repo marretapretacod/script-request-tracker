@@ -1,0 +1,68 @@
+flowchart TD
+    Start([Início: Receber payload JSON]) --> ParseJSON[Converter JSON e iniciar HttpRequest]
+    ParseJSON --> CheckAuth{rt_url e rt_token<br/>estão presentes?}
+    
+    CheckAuth -- Não --> Error([Logar erro e lançar exceção])
+    CheckAuth -- Sim --> CheckEvent{event_value == 1?<br/>Problema ativo?}
+    
+    CheckEvent -- Não --> EndOK([Retornar 'OK' e encerrar])
+    CheckEvent -- Sim --> SetupHTTP[Normalizar URL e configurar<br/>Headers HTTP + Auth]
+    
+    SetupHTTP --> ExtractTags[Extrair rawTags de event_tags<br/>ou da mensagem]
+    ExtractTags --> CheckQueue{Quantas tags<br/>'rt_queue' existem?}
+    
+    CheckQueue -- "Mais de 1" --> Error
+    CheckQueue -- "Exatamente 1" --> SetQueue[Definir Queue = valor da tag]
+    CheckQueue -- "Nenhuma" --> DefaultQueue[Definir Queue = 'NÃO CLASSIFICADO']
+    
+    SetQueue --> ValidateText
+    DefaultQueue --> ValidateText
+    
+    ValidateText{Subject e Message<br/>estão preenchidos?}
+    ValidateText -- Não --> Error
+    ValidateText -- Sim --> CheckEventos{Queue == 'EVENTOS'?}
+    
+    CheckEventos -- Sim --> ExtractHost[Extrair hostOnly antes de ' - ']
+    ExtractHost --> HasHost{hostOnly<br/>encontrado?}
+    HasHost -- Não --> Error
+    HasHost -- Sim --> SqlEventos["Montar Query SQL:<br/>Queue='EVENTOS' + Status Ativo +<br/>Subject LIKE 'hostOnly -%'"]
+    
+    CheckEventos -- Não --> SqlDefault["Montar Query SQL:<br/>Queue=queue + Status Ativo +<br/>Subject = subject"]
+    
+    SqlEventos --> SearchRT
+    SqlDefault --> SearchRT
+    
+    SearchRT[GET /tickets?query=SQL<br/>Buscar ticket aberto no RT] --> SearchOk{HTTP 2xx e<br/>JSON válido?}
+    SearchOk -- Não --> Error
+    SearchOk -- Sim --> TicketExists{Encontrou ticket<br/>aberto existingId?}
+    
+    %% Caminho: Atualizar Ticket Existente
+    TicketExists -- Sim --> ReplyRT[POST /ticket/id/correspond<br/>Adicionar atualização ao ticket]
+    ReplyRT --> ReplyOk{HTTP 2xx?}
+    ReplyOk -- Não --> Error
+    ReplyOk -- Sim --> ReturnExisting([Retornar JSON com<br/>rt_ticket_id e rt_queue])
+    
+    %% Caminho: Criar Novo Ticket
+    TicketExists -- Não --> BuildPayload[Montar payload de criação:<br/>Queue, Subject, Content]
+    BuildPayload --> CheckProtocolo{Queue == 'PROTOCOLO'?}
+    
+    CheckProtocolo -- Sim --> ExtractPOP[Buscar grupo ONU_POP01..08<br/>nos host_groups]
+    ExtractPOP --> HasPOP{POP encontrado?}
+    HasPOP -- Sim --> AddCF[Adicionar CustomField 'POP'<br/>ao payload]
+    HasPOP -- Não --> CreateRT
+    AddCF --> CreateRT
+    
+    CheckProtocolo -- Não --> CreateRT[POST /ticket<br/>Criar novo ticket no RT]
+    
+    CreateRT --> CreateOk{HTTP 201/2xx,<br/>JSON válido e tem ID?}
+    CreateOk -- Não --> Error
+    CreateOk -- Sim --> ReturnCreated([Retornar JSON com<br/>novo rt_ticket_id e rt_queue])
+
+    %% Estilização
+    classDef errorNode fill:#ffebee,stroke:#c62828,color:#b71c1c;
+    classDef successNode fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
+    classDef decisionNode fill:#fff8e1,stroke:#f57f17,color:#e65100;
+    
+    class Error errorNode;
+    class EndOK,ReturnExisting,ReturnCreated successNode;
+    class CheckAuth,CheckEvent,CheckQueue,ValidateText,CheckEventos,HasHost,SearchOk,TicketExists,ReplyOk,CheckProtocolo,HasPOP,CreateOk decisionNode;

@@ -1,23 +1,40 @@
-event_id              = {EVENT.ID}
-event_value           = {EVENT.VALUE}
-event_name            = {EVENT.NAME}
-event_date            = {EVENT.DATE}
-event_time            = {EVENT.TIME}
-event_recovery_date   = {EVENT.RECOVERY.DATE}
-event_recovery_time   = {EVENT.RECOVERY.TIME}
-event_duration        = {EVENT.DURATION}
-event_opdata          = {EVENT.OPDATA}
-host_name             = {HOST.NAME}
-host_ip               = {HOST.IP}
-severity              = {EVENT.SEVERITY}
-trigger_id            = {TRIGGER.ID}
-subject               = {ALERT.SUBJECT}
-message               = {ALERT.MESSAGE}
-geo                   = {EVENT.TAGS.GEO}
-pop                   = {EVENT.TAGS.POP}
-rt_url                = https://rt.example.local
-rt_token              = SEU_NOVO_TOKEN
-rt_queue              = PROTOCOLO
-rt_event_cf           = ZabbixEventID
-rt_initial_status     = new
-rt_resolved_status    = resolved
+MEDIA TYPE > PARAMETERS (ZABBIX -> RT WEBHOOK)
+Observacao: Remova o parametro antigo "pop" caso exista, para evitar que o Zabbix envie *UNKNOWN*.
+
+1. OBRIGATORIOS (CONEXAO E CONTROLE)
+rt_url = https://seu-rt.dominio.com.br
+rt_token = seu_token_api_rt
+rt_queue = PROTOCOLO
+event_id = {EVENT.ID}
+event_value = {EVENT.VALUE}
+
+2. DADOS DO HOST, POP E LOCALIZACAO
+host_groups = {TRIGGER.HOSTGROUP.NAME}
+host_name = {HOST.NAME}
+host_ip = {HOST.IP}
+latitude = {INVENTORY.LOCATION.LAT}
+longitude = {INVENTORY.LOCATION.LON}
+
+3. DADOS DO INCIDENTE, ATUALIZACAO E RECUPERACAO
+event_name = {EVENT.NAME}
+severity = {EVENT.SEVERITY}
+trigger_id = {TRIGGER.ID}
+event_date = {EVENT.DATE}
+event_time = {EVENT.TIME}
+event_info = Texto livre opcional para a secao INFORMACOES DO EVENTO
+message = {ALERT.MESSAGE}
+event_opdata = {EVENT.OPDATA}
+event_update_action = {EVENT.UPDATE.ACTION}
+event_update_message = {EVENT.UPDATE.MESSAGE}
+event_recovery_date = {EVENT.RECOVERY.DATE}
+event_recovery_time = {EVENT.RECOVERY.TIME}
+event_duration = {EVENT.DURATION}
+
+4. OPCIONAIS E CUSTOMIZACAO DO RT
+rt_event_cf = ZabbixEventID
+rt_pop_cf = NomeDoCampoPOP
+rt_initial_status = new
+rt_resolved_status = resolved
+rt_requestor = zabbix@suaempresa.com.br
+subject = {ALERT.SUBJECT}
+event_url = http://IP-ZABBIX/zabbix/tr_events.php?triggerid={TRIGGER.ID}&eventid={EVENT.ID}

@@ -1,21 +1,4 @@
-/*
- * Zabbix -> Request Tracker (RT) Webhook
- *
- * Fluxo:
- * - EVENT.VALUE = 1: procura o ticket e cria ou atualiza.
- * - EVENT.VALUE = 0: comenta e resolve o ticket existente.
- *
- * Requisitos:
- * - API REST 2.0 do RT habilitada.
- * - Token com permissao para pesquisar, criar, comentar e alterar tickets.
- * - Campo personalizado ZabbixEventID aplicado a fila PROTOCOLO do RT.
- * - Parametros latitude e longitude vindos do inventario do host.
- * - Parametro host_groups configurado no Media Type com {TRIGGER.HOSTGROUP.NAME}.
- *
- * Observacao:
- * - O filtro para enviar somente eventos Disaster deve ser configurado
- *   na Action do Zabbix: Trigger severity equals Disaster.
- */
+
 
 var RTWebhook = {
     params: {},
@@ -33,11 +16,70 @@ var RTWebhook = {
             throw 'Parametro obrigatorio ausente: rt_token';
         }
 
-        if (!RTWebhook.params.rt_queue) {
-            throw 'Parametro obrigatorio ausente: rt_queue';
-        }
+        RTWebhook.params.subject = String(
+            RTWebhook.params.subject || RTWebhook.params.alert_subject || ''
+        ).replace(/^\s+|\s+$/g, '');
+        RTWebhook.params.message = String(
+            RTWebhook.params.message || RTWebhook.params.alert_message || ''
+        ).replace(/^\s+|\s+$/g, '');
+        RTWebhook.params.host_groups =
+            RTWebhook.params.host_groups || RTWebhook.params.groups || '';
+        RTWebhook.params.rt_queue = RTWebhook.getQueue(RTWebhook.params);
 
         RTWebhook.params.rt_url = RTWebhook.params.rt_url.replace(/\/+$/, '');
+    },
+
+    /* Usa a tag rt_queue do script antigo, com fallback para rt_queue direto. */
+    getQueue: function (params) {
+        var rawTags = params.event_tags || '',
+            message = params.message || params.alert_message || '',
+            match,
+            parts,
+            queues = [],
+            i,
+            item,
+            separator,
+            key,
+            queue;
+
+        if (!rawTags) {
+            match = String(message).match(
+                /(?:^|\n)\s*EVENT_TAGS\s*=\s*([^\r\n]+)/
+            );
+            if (match) {
+                rawTags = match[1];
+            }
+        }
+
+        parts = String(rawTags).split(',');
+        for (i = 0; i < parts.length; i++) {
+            item = parts[i].replace(/^\s+|\s+$/g, '');
+            separator = item.indexOf(':');
+            if (separator === -1) {
+                separator = item.indexOf('=');
+            }
+            if (separator === -1) {
+                continue;
+            }
+
+            key = item.substring(0, separator).replace(/^\s+|\s+$/g, '');
+            if (key === 'rt_queue') {
+                queue = item.substring(separator + 1)
+                    .replace(/^\s+|\s+$/g, '');
+                if (queue) {
+                    queues.push(queue);
+                }
+            }
+        }
+
+        if (queues.length > 1) {
+            throw 'Mais de uma tag rt_queue encontrada: ' +
+                JSON.stringify(queues);
+        }
+
+        return queues.length === 1 ?
+            queues[0] :
+            (params.rt_queue || 'NÃO CLASSIFICADO');
     },
 
     /* Cria e reutiliza o cliente HTTP com os cabecalhos da API do RT. */
@@ -211,26 +253,46 @@ var RTWebhook = {
             );
     },
 
+    escapeHtml: function (value) {
+        return String(value === null || value === undefined ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    },
+
     /* Retorna o nome do campo que relaciona evento e ticket. */
     getCustomFieldName: function () {
         return RTWebhook.params.rt_event_cf || 'ZabbixEventID';
     },
 
-    /* Procura um ticket na fila pelo Event ID do Zabbix. */
+    /* Procura ticket aberto pelo host em EVENTOS ou pelo assunto nas demais filas. */
     findTicket: function () {
-        var eventId = RTWebhook.params.event_id,
-            fieldName = RTWebhook.getCustomFieldName(),
+        var subject = RTWebhook.getTicketSubject(),
+            hostName = RTWebhook.params.host_name ||
+                (subject ? subject.split(' - ')[0] : ''),
             query,
-            response;
+            response,
+            i,
+            ticket;
 
-        query =
-            "Queue = '" +
+        if (!hostName) {
+            throw 'Parametro obrigatorio ausente: host_name';
+        }
+
+        query = "Queue = '" +
             RTWebhook.escapeSearchValue(RTWebhook.params.rt_queue) +
-            "' AND CF.{" +
-            fieldName +
-            "} = '" +
-            RTWebhook.escapeSearchValue(eventId) +
-            "'";
+            "' AND (Status = 'new' OR Status = 'open' OR Status = 'stalled')";
+
+        if (RTWebhook.params.rt_queue === 'EVENTOS') {
+            query += " AND Subject LIKE '" +
+                RTWebhook.escapeSearchValue(hostName) + " -%'";
+        }
+        else {
+            query += " AND Subject = '" +
+                RTWebhook.escapeSearchValue(subject) + "'";
+        }
 
         response = RTWebhook.requestApi(
             'GET',
@@ -240,8 +302,17 @@ var RTWebhook = {
             null
         );
 
-        if (response && response.items && response.items.length > 0) {
-            return response.items[0];
+        if (response && response.items) {
+            for (i = 0; i < response.items.length; i++) {
+                ticket = response.items[i];
+                if (ticket.Subject && (
+                    RTWebhook.params.rt_queue === 'EVENTOS' ?
+                        String(ticket.Subject).indexOf(hostName + ' -') === 0 :
+                        String(ticket.Subject) === subject
+                )) {
+                    return ticket;
+                }
+            }
         }
 
         return null;
@@ -291,70 +362,83 @@ var RTWebhook = {
     /* Monta o texto inicial do ticket para o tecnico. */
     buildDispatch: function (mapsLink, coordinates) {
         var lines = [],
+            message = RTWebhook.params.message,
             pop = RTWebhook.getPop(),
             eventDateTime = (
                 (RTWebhook.params.event_date || '') +
                 ' ' +
                 (RTWebhook.params.event_time || '')
             ).replace(/^\s+|\s+$/g, ''),
-            displayDateTime = eventDateTime.replace(
-                /^(\d{4})\.(\d{2})\.(\d{2})/,
-                '$3/$2/$1'
-            ),
             hostName = RTWebhook.params.host_name || 'Nao informado',
             eventName = RTWebhook.params.event_name || 'Nao informado',
             severity = RTWebhook.params.severity || 'Nao informada';
 
-        lines.push('ACIONAMENTO TECNICO');
-        lines.push('========================================');
-        lines.push('');
-        lines.push('Data/hora: ' + (displayDateTime || 'Nao informada'));
-        lines.push('');
-        lines.push('Unidade/Host: ' + hostName);
-        lines.push('POP: ' + (pop || 'Nao informado'));
-        lines.push('Problema: ' + eventName);
-        lines.push('Severidade: ' + severity);
-        lines.push('');
-
-        lines.push('LOCALIZACAO');
-        lines.push('----------------------------------------');
+        if (message) {
+            lines.push(
+                RTWebhook.escapeHtml(message)
+                    .replace(/\r\n|\r|\n/g, '<br>')
+            );
+            lines.push('----------------------------------------');
+            lines.push('LOCALIZACAO');
+            lines.push('----------------------------------------');
+        }
+        else {
+            lines.push('----------------------------------------');
+            lines.push('INFORMAÇÕES DO EVENTO');
+            lines.push('----------------------------------------');
+            lines.push('Unidade/Host: ' + RTWebhook.escapeHtml(hostName));
+            lines.push('POP: ' + RTWebhook.escapeHtml(pop || 'Nao informado'));
+            lines.push('Início:  ' +
+                RTWebhook.escapeHtml(eventDateTime || 'Nao informada'));
+            lines.push('Problema: ' + RTWebhook.escapeHtml(eventName));
+            lines.push('Severidade: ' + RTWebhook.escapeHtml(severity));
+            lines.push('ID Evento Zabbix: ' +
+                RTWebhook.escapeHtml(RTWebhook.params.event_id || 'Nao informado'));
+            lines.push('----------------------------------------');
+            lines.push('LOCALIZACAO');
+            lines.push('----------------------------------------');
+        }
 
         if (coordinates && coordinates.dms) {
-            lines.push('Coordenadas DMS: ' + coordinates.dms);
+            lines.push('Coordenadas DMS: ' +
+                RTWebhook.escapeHtml(coordinates.dms));
         }
         else {
             lines.push('Coordenadas DMS: nao informadas ou invalidas');
         }
 
         if (mapsLink) {
-            lines.push('Google Maps: ' + mapsLink);
+            lines.push(
+                'Google Maps: <a href="' +
+                RTWebhook.escapeHtml(mapsLink) +
+                '" target="_blank" rel="noopener noreferrer">' +
+                RTWebhook.escapeHtml(mapsLink) +
+                '</a>'
+            );
         }
         else {
             lines.push('Google Maps: link nao disponivel');
         }
-        lines.push('POP: ' + (pop || 'Nao informado'));
 
-        lines.push('');
-        lines.push('INFORMACOES DO EVENTO');
-        lines.push('----------------------------------------');
-        if (RTWebhook.params.event_info) {
-            lines.push(RTWebhook.params.event_info);
+        return lines.join('<br>');
+    },
+
+    /* Garante que o host esteja no assunto para agrupar os tickets futuros. */
+    getTicketSubject: function () {
+        var hostName = RTWebhook.params.host_name || 'Host desconhecido',
+            subject = RTWebhook.params.subject || '',
+            hostMarker = hostName + ' -';
+
+        if (!subject) {
+            subject =
+                '[Zabbix][' +
+                (RTWebhook.params.severity || 'Alerta') +
+                '] ' +
+                hostMarker + ' ' +
+                (RTWebhook.params.event_name || 'Evento');
         }
 
-        lines.push('');
-        lines.push('ORIENTACOES DO TICKET');
-        lines.push('----------------------------------------');
-        lines.push('Problema iniciado em:  ' +
-            (eventDateTime || 'Nao informada'));
-        lines.push('');
-        lines.push('Problema : ' + hostName + ' - ' + eventName);
-        lines.push('');
-        lines.push('Severidade: ' + severity);
-        lines.push('');
-        lines.push('ID Evento Zabbix: ' +
-            (RTWebhook.params.event_id || 'Nao informado'));
-
-        return lines.join('\n');
+        return subject;
     },
 
     /* Cria um ticket quando ainda nao existe ticket para o evento. */
@@ -373,21 +457,12 @@ var RTWebhook = {
         );
         mapsLink = RTWebhook.createMapsLink(coordinates);
         dispatch = RTWebhook.buildDispatch(mapsLink, coordinates);
+        subject = RTWebhook.getTicketSubject();
 
-        subject = RTWebhook.params.subject;
-
-        if (!subject) {
-            subject =
-                '[Zabbix][' +
-                (RTWebhook.params.severity || 'Alerta') +
-                '] ' +
-                (RTWebhook.params.host_name || 'Host desconhecido') +
-                ' - ' +
-                (RTWebhook.params.event_name || 'Evento');
+        if (RTWebhook.params.event_id) {
+            customFields[RTWebhook.getCustomFieldName()] =
+                RTWebhook.params.event_id;
         }
-
-        customFields[RTWebhook.getCustomFieldName()] =
-            RTWebhook.params.event_id;
 
         if (RTWebhook.params.rt_queue === 'PROTOCOLO') {
             var popValue = RTWebhook.extractPopFromHostGroups(
@@ -403,7 +478,7 @@ var RTWebhook = {
             Queue: RTWebhook.params.rt_queue,
             Subject: subject,
             Content: dispatch,
-            ContentType: 'text/plain',
+            ContentType: 'text/html',
             Status: RTWebhook.params.rt_initial_status || 'new',
             CustomFields: customFields
         };
@@ -470,12 +545,35 @@ var RTWebhook = {
             mapsLink = RTWebhook.createMapsLink(coordinates),
             comment = [];
 
-        comment.push('Atualizacao recebida do Zabbix.');
-        comment.push('');
-        comment.push('Evento: ' + (RTWebhook.params.event_name || '-'));
-        comment.push('Host: ' + (RTWebhook.params.host_name || '-'));
-        comment.push('Severidade: ' + (RTWebhook.params.severity || '-'));
-        comment.push('POP: ' + (RTWebhook.getPop() || '-'));
+        if (RTWebhook.params.message) {
+            comment.push(RTWebhook.params.message);
+        }
+        else {
+            comment.push('Novo problema detectado no Zabbix.');
+            comment.push('');
+            comment.push('ID Evento Zabbix: ' +
+                (RTWebhook.params.event_id || '-'));
+            comment.push(
+                'Inicio: ' +
+                (RTWebhook.params.event_date || '') +
+                ' ' +
+                (RTWebhook.params.event_time || '')
+            );
+            comment.push('Evento: ' + (RTWebhook.params.event_name || '-'));
+            comment.push('Host: ' + (RTWebhook.params.host_name || '-'));
+            comment.push('Severidade: ' + (RTWebhook.params.severity || '-'));
+            comment.push('POP: ' + (RTWebhook.getPop() || '-'));
+
+            if (RTWebhook.params.event_update_action) {
+                comment.push('Acao: ' + RTWebhook.params.event_update_action);
+            }
+
+            if (RTWebhook.params.event_update_message) {
+                comment.push('');
+                comment.push('Mensagem da atualizacao:');
+                comment.push(RTWebhook.params.event_update_message);
+            }
+        }
 
         if (coordinates && coordinates.dms) {
             comment.push('Coordenadas DMS: ' + coordinates.dms);
@@ -485,45 +583,35 @@ var RTWebhook = {
             comment.push('Google Maps: ' + mapsLink);
         }
 
-        if (RTWebhook.params.event_update_action) {
-            comment.push('Acao: ' + RTWebhook.params.event_update_action);
-        }
-
-        if (RTWebhook.params.event_update_message) {
-            comment.push('');
-            comment.push('Mensagem da atualizacao:');
-            comment.push(RTWebhook.params.event_update_message);
-        }
-
         return RTWebhook.addComment(ticketId, comment.join('\n'));
     },
 
-    /* Comenta a recuperacao e muda o status para resolvido. */
-    resolveTicket: function (ticketId) {
-        var comment = [],
-            finalStatus = RTWebhook.params.rt_resolved_status || 'resolved';
+    /* Registra a recuperacao sem fechar o ticket compartilhado. */
+    commentRecovery: function (ticketId) {
+        var comment = [];
 
-        comment.push('Evento encerrado no Zabbix.');
-        comment.push('');
-        comment.push('Evento: ' + (RTWebhook.params.event_name || '-'));
-        comment.push('Host: ' + (RTWebhook.params.host_name || '-'));
-        comment.push(
-            'Data/hora de recuperacao: ' +
-            (RTWebhook.params.event_recovery_date || '') +
-            ' ' +
-            (RTWebhook.params.event_recovery_time || '')
-        );
-        if (RTWebhook.params.event_duration) {
-            comment.push('Duracao: ' + RTWebhook.params.event_duration);
+        if (RTWebhook.params.message) {
+            comment.push(RTWebhook.params.message);
+        }
+        else {
+            comment.push('Problema normalizado no Zabbix.');
+            comment.push('');
+            comment.push('ID Evento Zabbix: ' +
+                (RTWebhook.params.event_id || '-'));
+            comment.push('Evento: ' + (RTWebhook.params.event_name || '-'));
+            comment.push('Host: ' + (RTWebhook.params.host_name || '-'));
+            comment.push(
+                'Data/hora de recuperacao: ' +
+                (RTWebhook.params.event_recovery_date || '') +
+                ' ' +
+                (RTWebhook.params.event_recovery_time || '')
+            );
+            if (RTWebhook.params.event_duration) {
+                comment.push('Duracao: ' + RTWebhook.params.event_duration);
+            }
         }
 
-        RTWebhook.addComment(ticketId, comment.join('\n'));
-
-        return RTWebhook.requestApi(
-            'PUT',
-            '/REST/2.0/ticket/' + encodeURIComponent(ticketId),
-            {Status: finalStatus}
-        );
+        return RTWebhook.addComment(ticketId, comment.join('\n'));
     }
 };
 
@@ -534,12 +622,17 @@ try {
 
     RTWebhook.setParams(params);
 
-    if (!params.event_id) {
-        throw 'Parametro obrigatorio ausente: event_id';
-    }
-
     if (params.event_value === undefined || params.event_value === null) {
         throw 'Parametro obrigatorio ausente: event_value';
+    }
+
+    if (String(params.event_value) === '1') {
+        if (!params.subject) {
+            throw 'Parametro obrigatorio ausente: subject';
+        }
+        if (!params.message) {
+            throw 'Parametro obrigatorio ausente: message';
+        }
     }
 
     ticket = RTWebhook.findTicket();
@@ -561,12 +654,12 @@ try {
     }
     else if (String(params.event_value) === '0') {
         if (ticket === null) {
-            throw 'Nao foi encontrado ticket para resolver.';
+            throw 'Nao foi encontrado chamado aberto para registrar a recuperacao.';
         }
 
-        RTWebhook.resolveTicket(ticket.id);
+        RTWebhook.commentRecovery(ticket.id);
         result = {
-            status: 'resolved',
+            status: 'recovery_noted',
             ticket_id: ticket.id,
             event_id: params.event_id
         };

@@ -4,9 +4,13 @@ Observacao: Remova o parametro antigo "pop" caso exista, para evitar que o Zabbi
 1. OBRIGATORIOS (CONEXAO E CONTROLE)
 rt_url = https://seu-rt.dominio.com.br
 rt_token = seu_token_api_rt
-rt_queue = PROTOCOLO
-event_id = {EVENT.ID}
 event_value = {EVENT.VALUE}
+event_tags = {EVENT.TAGS}
+subject = {ALERT.SUBJECT}
+message = {ALERT.MESSAGE}
+Compatibilidade: alert_subject/alert_message substituem subject/message; groups substitui host_groups.
+Se event_tags nao for enviado, a tag tambem pode ser lida de uma linha EVENT_TAGS= dentro de message.
+Para editar textos sem alterar o codigo, edite os modelos Problem, Update e Recovery em Alerts > Media types > Zabbix RT > Message templates. O parametro message recebe o texto do modelo ativo.
 
 2. DADOS DO HOST, POP E LOCALIZACAO
 host_groups = {TRIGGER.HOSTGROUP.NAME}
@@ -22,7 +26,6 @@ trigger_id = {TRIGGER.ID}
 event_date = {EVENT.DATE}
 event_time = {EVENT.TIME}
 event_info = Texto livre opcional para a secao INFORMACOES DO EVENTO
-message = {ALERT.MESSAGE}
 event_opdata = {EVENT.OPDATA}
 event_update_action = {EVENT.UPDATE.ACTION}
 event_update_message = {EVENT.UPDATE.MESSAGE}
@@ -31,10 +34,13 @@ event_recovery_time = {EVENT.RECOVERY.TIME}
 event_duration = {EVENT.DURATION}
 
 4. OPCIONAIS E CUSTOMIZACAO DO RT
+rt_queue = PROTOCOLO
+event_id = {EVENT.ID}
 rt_event_cf = ZabbixEventID
 rt_pop_cf = NomeDoCampoPOP
 rt_initial_status = new
-rt_resolved_status = resolved
 rt_requestor = zabbix@suaempresa.com.br
-subject = {ALERT.SUBJECT}
 event_url = http://IP-ZABBIX/zabbix/tr_events.php?triggerid={TRIGGER.ID}&eventid={EVENT.ID}
+Observacao: rt_queue e usado somente como fallback quando a tag rt_queue nao existe.
+
+Recuperacoes sao registradas como comentario; o ticket compartilhado deve ser fechado manualmente.

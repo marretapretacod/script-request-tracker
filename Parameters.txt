@@ -14,6 +14,7 @@ Para editar textos sem alterar o codigo, edite os modelos Problem, Update e Reco
 
 2. DADOS DO HOST, POP E LOCALIZACAO
 host_groups = {TRIGGER.HOSTGROUP.NAME}
+O POP extraido do grupo ONU_POP0x aparece em linha propria apos Problema.
 host_name = {HOST.NAME}
 host_ip = {HOST.IP}
 latitude = {INVENTORY.LOCATION.LAT}
@@ -27,6 +28,7 @@ event_date = {EVENT.DATE}
 event_time = {EVENT.TIME}
 event_info = Texto livre opcional para a secao INFORMACOES DO EVENTO
 event_opdata = {EVENT.OPDATA}
+O motivo exibido no ticket vem de event_opdata; configure Dados operacionais na trigger do Zabbix para preencher essa informacao.
 event_update_action = {EVENT.UPDATE.ACTION}
 event_update_message = {EVENT.UPDATE.MESSAGE}
 event_recovery_date = {EVENT.RECOVERY.DATE}
@@ -44,3 +46,4 @@ event_url = http://IP-ZABBIX/zabbix/tr_events.php?triggerid={TRIGGER.ID}&eventid
 Observacao: rt_queue e usado somente como fallback quando a tag rt_queue nao existe.
 
 Recuperacoes sao registradas como comentario; o ticket compartilhado deve ser fechado manualmente.
+Atualizacoes alteram assunto e campos ZabbixEventID/POP quando enviados e adicionam um novo comentario com a mensagem do template. Comentarios anteriores permanecem no historico.

@@ -16,9 +16,20 @@ var RTWebhook = {
             throw 'Parametro obrigatorio ausente: rt_token';
         }
 
+        var hostName = String(RTWebhook.params.host_name || '')
+                .replace(/^\s+|\s+$/g, ''),
+            eventName = String(RTWebhook.params.event_name || '')
+                .replace(/^\s+|\s+$/g, '');
+
+        /* Usa o assunto do template; na ausencia dele, reproduz HOST.NAME - EVENT.NAME. */
         RTWebhook.params.subject = String(
             RTWebhook.params.subject || RTWebhook.params.alert_subject || ''
         ).replace(/^\s+|\s+$/g, '');
+        if (!RTWebhook.params.subject && hostName && eventName) {
+            RTWebhook.params.subject = hostName + ' - ' + eventName;
+        }
+
+        /* Recebe a mensagem ja renderizada pelo template do Zabbix. */
         RTWebhook.params.message = String(
             RTWebhook.params.message || RTWebhook.params.alert_message || ''
         ).replace(/^\s+|\s+$/g, '');
@@ -29,7 +40,8 @@ var RTWebhook = {
         RTWebhook.params.rt_url = RTWebhook.params.rt_url.replace(/\/+$/, '');
     },
 
-    /* Usa a tag rt_queue do script antigo, com fallback para rt_queue direto. */
+    /* Script antigo, com fallback para rt_queue direto. */
+    //mudado pra resolver o erro do zabbix que nao estava pegando a fila correta
     getQueue: function (params) {
         var rawTags = params.event_tags || '',
             message = params.message || params.alert_message || '',
@@ -42,7 +54,7 @@ var RTWebhook = {
             key,
             queue;
 
-        if (!rawTags) {
+            if (!rawTags) {
             match = String(message).match(
                 /(?:^|\n)\s*EVENT_TAGS\s*=\s*([^\r\n]+)/
             );
@@ -359,6 +371,98 @@ var RTWebhook = {
         return RTWebhook.extractPopFromHostGroups(RTWebhook.params.host_groups);
     },
 
+    /* Retorna os dados operacionais da trigger, usados como causa do problema. */
+    getEventReason: function () {
+        var reason = String(
+            RTWebhook.params.event_opdata ||
+            RTWebhook.params.event_info ||
+            ''
+        ).replace(/^\s+|\s+$/g, '');
+
+        if (
+            reason === '*UNKNOWN*' ||
+            reason.indexOf('{') === 0
+        ) {
+            return '';
+        }
+
+        return reason;
+    },
+
+    /* Formata a data do evento como DD/MM/AAAA para o corpo do ticket. */
+    formatEventDate: function (date) {
+        var value = String(date || '').replace(/^\s+|\s+$/g, ''),
+            match,
+            day,
+            month,
+            year;
+
+        match = value.match(/^(\d{4})[./-](\d{1,2})[./-](\d{1,2})$/);
+        if (match) {
+            year = match[1];
+            month = ('0' + match[2]).slice(-2);
+            day = ('0' + match[3]).slice(-2);
+            return day + '/' + month + '/' + year;
+        }
+
+        match = value.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
+        if (match) {
+            day = ('0' + match[1]).slice(-2);
+            month = ('0' + match[2]).slice(-2);
+            year = match[3];
+            return day + '/' + month + '/' + year;
+        }
+
+        return value;
+    },
+
+    /* Formata a linha de data do template sem alterar as demais linhas editaveis. */
+    formatEventMessage: function (message) {
+        var eventDate = RTWebhook.formatEventDate(
+                RTWebhook.params.event_date
+            ),
+            eventTime = String(RTWebhook.params.event_time || '')
+                .replace(/^\s+|\s+$/g, ''),
+            eventReason = RTWebhook.getEventReason() ||
+                'Nao informado no Zabbix';
+
+        message = String(message || '');
+        if (eventDate && eventTime) {
+            message = message.replace(
+                /^Problema iniciado em:[^\r\n]*/im,
+                'Problema iniciado em: ' +
+                    eventDate +
+                    ' -  ' +
+                    eventTime
+            );
+        }
+
+        if (!/(?:^|\r?\n)\s*POP\s*:/im.test(message)) {
+            message = message.replace(
+                /^([ \t]*Problema\s*:[^\r\n]*)/im,
+                '$1\nPOP: ' + (RTWebhook.getPop() || 'Nao informado')
+            );
+        }
+
+        /* Acrescenta EVENT.OPDATA apos POP, sem duplicar Motivo ja escrito no template. */
+        if (!/(?:^|\r?\n)\s*Motivo\s*:/im.test(message)) {
+            if (/^([ \t]*POP\s*:[^\r\n]*)/im.test(message)) {
+                message = message.replace(
+                    /^([ \t]*POP\s*:[^\r\n]*)/im,
+                    '$1\nMotivo: ' + eventReason
+                );
+            }
+            else {
+                message = message.replace(
+                    /^([ \t]*Problema\s*:[^\r\n]*)/im,
+                    '$1\nMotivo: ' + eventReason
+                );
+            }
+        }
+
+        return message;
+    },
+
     /* Monta o texto inicial do ticket para o tecnico. */
     buildDispatch: function (mapsLink, coordinates) {
         var lines = [],
@@ -375,7 +479,9 @@ var RTWebhook = {
 
         if (message) {
             lines.push(
-                RTWebhook.escapeHtml(message)
+                RTWebhook.escapeHtml(
+                    RTWebhook.formatEventMessage(message)
+                )
                     .replace(/\r\n|\r|\n/g, '<br>')
             );
             lines.push('----------------------------------------');
@@ -391,6 +497,9 @@ var RTWebhook = {
             lines.push('Início:  ' +
                 RTWebhook.escapeHtml(eventDateTime || 'Nao informada'));
             lines.push('Problema: ' + RTWebhook.escapeHtml(eventName));
+            lines.push('Motivo: ' + RTWebhook.escapeHtml(
+                RTWebhook.getEventReason() || 'Nao informado no Zabbix'
+            ));
             lines.push('Severidade: ' + RTWebhook.escapeHtml(severity));
             lines.push('ID Evento Zabbix: ' +
                 RTWebhook.escapeHtml(RTWebhook.params.event_id || 'Nao informado'));
@@ -543,10 +652,41 @@ var RTWebhook = {
                 RTWebhook.params.latitude + ',' + RTWebhook.params.longitude
             ),
             mapsLink = RTWebhook.createMapsLink(coordinates),
-            comment = [];
+            comment = [],
+            customFields = {},
+            updatePayload = {
+                Subject: RTWebhook.getTicketSubject()
+            },
+            popValue;
 
+        if (RTWebhook.params.event_id) {
+            customFields[RTWebhook.getCustomFieldName()] =
+                RTWebhook.params.event_id;
+        }
+
+        if (RTWebhook.params.rt_queue === 'PROTOCOLO') {
+            popValue = RTWebhook.extractPopFromHostGroups(
+                RTWebhook.params.host_groups
+            );
+            if (popValue) {
+                customFields['POP'] = popValue;
+            }
+        }
+
+        if (RTWebhook.params.event_id || popValue) {
+            updatePayload.CustomFields = customFields;
+        }
+
+        RTWebhook.requestApi(
+            'PUT',
+            '/REST/2.0/ticket/' + encodeURIComponent(ticketId),
+            updatePayload
+        );
+        // finaliza aqui a parte que da pra alterar no ticket, agora vamos adicionar o comentario com as informacoes do evento
         if (RTWebhook.params.message) {
-            comment.push(RTWebhook.params.message);
+            comment.push(
+                RTWebhook.formatEventMessage(RTWebhook.params.message)
+            );
         }
         else {
             comment.push('Novo problema detectado no Zabbix.');
@@ -561,6 +701,8 @@ var RTWebhook = {
             );
             comment.push('Evento: ' + (RTWebhook.params.event_name || '-'));
             comment.push('Host: ' + (RTWebhook.params.host_name || '-'));
+            comment.push('Motivo: ' +
+                (RTWebhook.getEventReason() || 'Nao informado no Zabbix'));
             comment.push('Severidade: ' + (RTWebhook.params.severity || '-'));
             comment.push('POP: ' + (RTWebhook.getPop() || '-'));
 
@@ -575,12 +717,18 @@ var RTWebhook = {
             }
         }
 
-        if (coordinates && coordinates.dms) {
-            comment.push('Coordenadas DMS: ' + coordinates.dms);
-        }
+        if ((coordinates && coordinates.dms) || mapsLink) {
+            comment.push('----------------------------------------');
+            comment.push('LOCALIZACAO');
+            comment.push('----------------------------------------');
 
-        if (mapsLink) {
-            comment.push('Google Maps: ' + mapsLink);
+            if (coordinates && coordinates.dms) {
+                comment.push('Coordenadas DMS: ' + coordinates.dms);
+            }
+
+            if (mapsLink) {
+                comment.push('Google Maps: ' + mapsLink);
+            }
         }
 
         return RTWebhook.addComment(ticketId, comment.join('\n'));
@@ -591,7 +739,9 @@ var RTWebhook = {
         var comment = [];
 
         if (RTWebhook.params.message) {
-            comment.push(RTWebhook.params.message);
+            comment.push(
+                RTWebhook.formatEventMessage(RTWebhook.params.message)
+            );
         }
         else {
             comment.push('Problema normalizado no Zabbix.');
@@ -600,6 +750,8 @@ var RTWebhook = {
                 (RTWebhook.params.event_id || '-'));
             comment.push('Evento: ' + (RTWebhook.params.event_name || '-'));
             comment.push('Host: ' + (RTWebhook.params.host_name || '-'));
+            comment.push('Motivo: ' +
+                (RTWebhook.getEventReason() || 'Nao informado no Zabbix'));
             comment.push(
                 'Data/hora de recuperacao: ' +
                 (RTWebhook.params.event_recovery_date || '') +
@@ -626,11 +778,12 @@ try {
         throw 'Parametro obrigatorio ausente: event_value';
     }
 
+    /* Valida o assunto do template (ou fallback) e a mensagem antes da criacao. */
     if (String(params.event_value) === '1') {
-        if (!params.subject) {
+        if (!RTWebhook.params.subject) {
             throw 'Parametro obrigatorio ausente: subject';
         }
-        if (!params.message) {
+        if (!RTWebhook.params.message) {
             throw 'Parametro obrigatorio ausente: message';
         }
     }
